@@ -1,0 +1,433 @@
+---
+title: "Middle Statistical learning Assignment-Wine quality classification"
+author: "Authors: Marel Arturo Castro, Ning Tian, Yanqing Shao (letters order)"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+## 1. Introduction & Data Preparation
+
+The project aims to use probability learning tools in statistics to predict the quality of wine based on its physicochemical indicators
+
+We first imported the red wine and white wine datasets, then extracted the first 500 samples from each and mixed them to form a total dataset containing 1000 samples with 13 features (2 categories and 11 numerics). To transform the regression problem into a binary classification problem, we binarized the target variable `quality`: a score of 6 or higher was defined as "good wine" (labeled 1), and a score below 6 was defined as "bad wine" (labeled 0).
+
+```{r include=FALSE}
+library(tidyverse)    
+library(MASS)        
+library(e1071)       
+library(caret)       
+library(klaR)        
+library(ggplot2)
+library(GGally)
+library(patchwork)
+library(readr)
+```
+
+```{r}
+set.seed(456)
+# prepare
+red_wine <- read_delim("winequality-red.csv", 
+                              delim = ";", escape_double = FALSE, trim_ws = TRUE)
+white_wine <- read_delim("winequality-white.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE)
+red_wine <- red_wine[1:500,]
+red_wine$type <- "red"
+white_wine <- white_wine[1:500,]
+white_wine$type <- "white"
+wine_total <- rbind(red_wine,white_wine)
+wine_total$quality <- ifelse(wine_total$quality>=6,1,0) # 1 as good quality, 0 as bad quality
+wine_total$quality <- as.factor(wine_total$quality)
+wine_total$type <- as.factor(wine_total$type)
+```
+
+## 2. Wine Quality Dataset
+
+Based on the initial data aggregation, our dataset contains 442 bottles of spoiled wine and 558 bottles of good wine. The class distribution is relatively balanced, making it suitable for direct training of a classification model.
+
+```{r}
+print("summary of data:")
+summary(wine_total)
+```
+
+```{r}
+cat("proportion of quality classes:",prop.table(table(wine_total$quality)))
+```
+
+### 2.1 Feature Correlation Analysis
+
+We need to understand the degree of linear correlation between different physicochemical indicators to rule out potential multicollinearity issues.
+
+```{r}
+wine_total %>%  
+  dplyr::select(-quality) %>%
+  ggcorr(label=TRUE,label_size = 3, hjust = 0.75)
+```
+
+By plotting the correlation heatmap of all numerical features, we observed some significant variable relationships:
+
+In particular, `free sulfur dioxide` and `total sulfur dioxide` show a very high positive correlation (≈0.8), indicating redundancy between predictors. Also, A strong negative relationship is observed between `alcohol` and `density`, `residual sugar` and `chlorides` also both present positive correlations with `density`.
+
+This suggests the presence of multicollinearity, which may affect the stability and interpretability of regression coefficients in probabilistic classification models such as logistic regression.
+
+### 2.2 Exploratory Data Analysis
+
+Before building the model, we observed the distribution of several key features under different wine qualities using a kernel density plot:
+
+```{r}
+p1 <- ggplot(wine_total, aes(x = alcohol, fill = quality)) +
+  geom_density(alpha = 0.5) +
+  labs(title="Alcohol distribution by wine quality")
+p2 <- ggplot(wine_total, aes(x = `volatile acidity`, fill = quality)) +
+  geom_density(alpha = 0.5) +
+  labs(title="volatile acidity distribution by wine quality")
+p3 <- ggplot(wine_total, aes(x = pH, fill = quality)) +
+  geom_density(alpha = 0.5) +
+  labs(title="PH distribution by wine quality")
+p4 <- ggplot(wine_total, aes(x = sulphates, fill = quality)) +
+  geom_density(alpha = 0.5) +
+  labs(title="sulphates distribution by wine quality")
+(p1 + p2) / (p3 + p4)
+```
+
+`Alcohol`: The alcohol content of fine wines is generally skewed to the right, and has a wider distribution in the higher alcohol content range. This indicates that fine wines often contain relatively high alcohol content.
+
+`Volatile acidity`: Bad wines showed a distinct second peak in the higher volatile acidity range, while good wines were highly concentrated in the lower range. This indicates that excessively high volatile acidity is highly likely to have a negative impact on wine quality.
+
+`pH`: The pH density curves of good and bad wines highly overlap, both mainly falling between 3.1 and 3.4. This indicates that pH value alone is insufficient to effectively distinguish the quality of wine.
+
+`Sulphates`: The density plot shows that wines classified as good tend to have slightly higher sulphate concentrations compared to low-quality wines. Although the two distributions largely overlap, the distribution for good wines is shifted to the right.
+
+After data processing, we divided the data into training and test sets at a ratio of 70% and 30%, respectively, to ensure the objectivity of subsequent model evaluation.
+
+```{r}
+# split training and testing
+index <- sample(1:nrow(wine_total),nrow(wine_total)) # mixed red and white wines here
+wine_total <- wine_total[index,]
+trainIndex <- createDataPartition(wine_total$quality, p = 0.7, list = FALSE)
+train <- wine_total[trainIndex, ]
+test  <- wine_total[-trainIndex, ]
+```
+
+Next, we trained probabilistic classification models on the training set and validated them on the test set.
+
+## 3. Logistic Regression
+
+```{r echo=TRUE}
+logit_model <- glm(quality ~ .,
+                   family = binomial(link = "logit"),
+                   data = train)
+summary(logit_model)
+```
+
+The initial logistic regression including all predictors shows clear signs of multicollinearity. Several variables represent the same underlying chemical mechanisms ,leading to extremely large standard errors and unstable coefficient estimates.
+
+Therefore, feature reduction is necessary before applying probabilistic classification models, removing redundant and derived variables in order to obtain a stable and interpretable model.
+
+```{r echo=TRUE}
+logit_model <- glm(quality ~ alcohol+`volatile acidity`+sulphates+chlorides+`residual sugar`+`citric acid`+`fixed acidity`+`total sulfur dioxide`,
+                   family = binomial(link = "logit"),
+                   data = train)
+summary(logit_model)
+```
+
+After removing redundant predictors which P-values are not significant, the model maintained nearly identical explanatory power while improving parsimony (lower AIC with fewer parameters). This suggests that some chemical measurements do not provide independent information about wine quality once key structural and stability variables are accounted for.
+
+```{r echo=TRUE}
+logit_model <- glm(quality ~ alcohol+`volatile acidity`+sulphates+`citric acid`+`fixed acidity`,
+                   family = binomial(link = "logit"),
+                   data = train)
+summary(logit_model)
+
+logit_probs <- predict(logit_model, newdata = test, type = "response")
+logit_pred <- factor(ifelse(logit_probs > 0.5, 1, 0), levels = c("0", "1"))
+logit_cm <- confusionMatrix(logit_pred, test$quality)
+logit_cm
+```
+
+Logistic regression maps linear combinations to probability values using the Sigmoid function. The model summary shows that `fixed acidity`, `volatile acidity`, `citric acid`, `sulfates`, and `alcohol` have significant statistical effects on the classification results (P \< 0.05).
+
+The logistic regression model achieved a prediction accuracy of 71.24% on the test set, which is more higher than No Information Rate : 55.85%.
+
+## 4. Linear Discriminant Analysis, LDA
+
+```{r}
+lda_model <- lda(quality ~ alcohol+`volatile acidity`+sulphates+`citric acid`+`fixed acidity`, data = train)
+lda_model
+
+lda_values <- predict(lda_model, train)
+lda_viz <- data.frame(  # Create visualization data
+  LD1 = lda_values$x[, 1],
+  quality = train$quality
+)
+ggplot(lda_viz, aes(x = LD1, fill = quality)) +  ## Plot the discriminant scores
+  geom_density(alpha = 0.5) +
+  labs(title = "LDA: Projection onto Linear Discriminant",
+       subtitle = "Separation between classes on the discriminant axis",
+       x = "Linear Discriminant 1 (LD1)", y = "Density") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1")
+
+lda_pred_obj <- predict(lda_model, newdata = test) ## Make predictions on test set
+lda_pred <- lda_pred_obj$class  ## Predicted classes
+lda_probs <- lda_pred_obj$posterior
+lda_cm <- confusionMatrix(lda_pred, test$quality)
+lda_cm
+```
+
+LDA assumes that the data in each category follow a multivariate normal distribution and have the same covariance matrix.
+
+The prior probabilities learned by the model from the training data are: bad wine accounts for 44.22%, and good wine accounts for 55.78%.
+
+The group means reveal clear differences between low and high quality wines: higher quality wines exhibit greater `alcohol` content, lower `volatile acidity`, and slightly higher `sulphates` and `fixed acidity`. The largest discriminant coefficient corresponds to `volatile acidity`, indicating that this variable provides the strongest separation between classes.
+
+By projecting multidimensional features onto the first linear discriminant axis, with higher quality wines concentrated toward larger LD1 values and lower quality wines toward smaller values.
+
+The LDA model achieved an accuracy of 71.57%, slightly outperforming logistic regression. The model shows higher specificity than sensitivity (because 'Positive' Class : 0 means the models capturing bad quality as primary), suggesting it is more effective at identifying high quality wines than bad quality ones.
+
+## 5. Quadratic Discriminant Analysis, QDA
+
+```{r}
+# QDA model
+qda_model <- qda(quality ~ alcohol+`volatile acidity`+sulphates+`citric acid`+`fixed acidity`,data = train)
+qda_model
+qda_pred_obj <- predict(qda_model, newdata = test)
+qda_probs <- qda_pred_obj$posterior
+qda_pred <- qda_pred_obj$class
+qda_cm <- confusionMatrix(qda_pred, test$quality)
+qda_cm
+```
+
+QDA relaxes the assumptions of LDA, allowing different categories to have their own covariance matrices and an improved balanced accuracy, indicating a better discrimination between wine quality classes. This means that QDA can capture more complex nonlinear relationships in the data.
+
+QDA achieved an accuracy of 74.58% on the test set, indicating that relaxing the covariance assumption helps improve model performance. The Cohen’s kappa of 0.48 indicates moderate agreement between the model predictions and the observed wine quality labels beyond what would be expected by random chance.
+
+## 6. Visualizing Decision Boundaries: LDA vs QDA
+
+To more intuitively understand why QDA performs better, we selected the two most critical features (`alcohol` and `volatile acidity`) and plotted their decision boundaries in a two dimensional plane.
+
+```{r}
+# Visualizing Decision Boundaries: LDA vs QDA
+lda_2d <- lda(quality ~ alcohol + `volatile acidity`, data=train)
+qda_2d <- qda(quality ~ alcohol + `volatile acidity`, data=train)
+x_range <- seq(min(wine_total$alcohol)-0.5, max(wine_total$alcohol)+0.5, length.out=200)
+y_range <- seq(min(wine_total$`volatile acidity`)-0.1, max(wine_total$`volatile acidity`)+0.1, length.out=200)
+grid <- expand.grid(alcohol=x_range,
+                    `volatile acidity`=y_range)
+grid$LDA <- predict(lda_2d, grid)$class
+grid$QDA <- predict(qda_2d, grid)$class
+p_lda <- ggplot() +
+  geom_tile(data = grid, aes(x = alcohol, y = `volatile acidity`, fill = LDA), alpha = 0.3) +
+  geom_point(data = train, aes(x = alcohol, y = `volatile acidity`, color = quality),
+             alpha = 0.5, size = 1) +
+  labs(title = "LDA Decision Boundary",
+       subtitle = "Linear boundary",
+       x = "Alcohol", y = "volatile acidity") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme(legend.position = "bottom")
+p_qda <- ggplot() +
+  geom_tile(data = grid, aes(x = alcohol, y = `volatile acidity`, fill = QDA), alpha = 0.3) +
+  geom_point(data = train, aes(x = alcohol, y = `volatile acidity`, color = quality),
+             alpha = 0.5, size = 1) +
+  labs(title = "QDA Decision Boundary",
+       subtitle = "Quadratic boundary",
+       x = "Alcohol", y = "volatile acidity") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme(legend.position = "bottom")
+p_lda+p_qda
+```
+
+The decision boundary plots illustrate the geometric difference between LDA and QDA using `alcohol` and `volatile acidity` as representative predictors. In both cases, higher `alcohol` content and lower `volatile acidity` are associated with higher quality wines. The LDA classifier produces a linear separation, reflecting its assumption of equal covariance structures between classes, whereas QDA generates a curved boundary by allowing class specific covariance matrices.
+
+Although QDA better adapts to the data distribution and slightly reduces misclassification, a substantial overlap between the two classes remains.
+
+## 7. Naive Bayes
+
+```{r}
+# Naive Bayes model
+nb_model <- naiveBayes(quality ~ alcohol+`volatile acidity`+sulphates+`citric acid`+`fixed acidity`,
+                       data = train)
+nb_model
+nb_pred <- predict(nb_model, newdata = test)
+nb_probs <- predict(nb_model,newdata = test, type = "raw")
+nb_cm <- confusionMatrix(nb_pred, test$quality)
+nb_cm
+
+```
+
+The model achieved an accuracy of 72.24%, which is higher than LDA's results and lower than QDA's results. Despite the assumption of independent between predictors, it still provides a reliable discrimination between different quality classes.
+
+The estimated conditional means show our previous finding: the good quality of wines usually have higher `alcohol` content and lower `volatile acidity`.
+
+## 8. Model Comparison
+
+```{r}
+# Model Comparison
+comparison <- data.frame(
+  Method = c("Logistic Regression", "LDA", "QDA", "Naive Bayes"),
+  Accuracy = c(logit_cm$overall["Accuracy"],
+               lda_cm$overall["Accuracy"],
+               qda_cm$overall["Accuracy"],
+               nb_cm$overall["Accuracy"]),
+  Sensitivity = c(logit_cm$byClass["Sensitivity"],
+                  lda_cm$byClass["Sensitivity"],
+                  qda_cm$byClass["Sensitivity"],
+                  nb_cm$byClass["Sensitivity"]),
+  Specificity = c(logit_cm$byClass["Specificity"],
+                  lda_cm$byClass["Specificity"],
+                  qda_cm$byClass["Specificity"],
+                  nb_cm$byClass["Specificity"])
+)
+
+knitr::kable(comparison, digits = 4,
+             caption = "Performance Comparison of Probabilistic Classifiers")
+
+comparison_long <- comparison %>%
+  pivot_longer(cols = -Method, names_to = "Metric", values_to = "Value")
+
+ggplot(comparison_long, aes(x = Method, y = Value, fill = Metric)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Performance Comparison of Probabilistic Classifiers",
+       y = "Value", x = "") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  coord_flip() +
+  theme(legend.position = "bottom")
+```
+
+The performance comparison shows that similar accuracies across all the probabilistic classifiers. Logistic and LDA achieve almost identical accuracy (≈71%), indicating that the classes separation is largely linear. Naive Bayes's result (≈72%) indicates the classification is driven by a small number of features (`alcohol` and `volatile acidity`) rather than a complex dependence structure.While QDA provides the highest accuracy (≈74.5%), reflecting a modest nonlinear separation between classes. But the improvement over linear way is limited.
+
+Additionally, all the methods show higher specificity than sensitivity, meaning that identifying good quality wines is easier then identifying bad quality wines.
+
+## 9. ROC Curves
+
+```{r}
+# ROC Curves
+library(pROC)
+roc_logit <- roc(test$quality, logit_probs, levels=c("0","1"))
+roc_lda   <- roc(test$quality, lda_probs[,"1"], levels=c("0","1"))
+roc_qda   <- roc(test$quality, qda_probs[,"1"], levels=c("0","1"))
+roc_nb    <- roc(test$quality, nb_probs[,"1"], levels=c("0","1"))
+roc_data <- bind_rows(
+  data.frame(Sensitivity = roc_logit$sensitivities,
+             Specificity = roc_logit$specificities,
+             Method = "Logistic", AUC = as.numeric(roc_logit$auc)),
+  data.frame(Sensitivity = roc_lda$sensitivities,
+             Specificity = roc_lda$specificities,
+             Method = "LDA", AUC = as.numeric(roc_lda$auc)),
+  data.frame(Sensitivity = roc_qda$sensitivities,
+             Specificity = roc_qda$specificities,
+             Method = "QDA", AUC = as.numeric(roc_qda$auc)),
+  data.frame(Sensitivity = roc_nb$sensitivities,
+             Specificity = roc_nb$specificities,
+             Method = "Naive Bayes", AUC = as.numeric(roc_nb$auc))
+)
+ggplot(roc_data, aes(x = 1 - Specificity, y = Sensitivity, color = Method)) +
+  geom_line(linewidth = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+  labs(title = "ROC Curves for Probabilistic Classifiers",
+       subtitle = "Diagonal line represents random guessing",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") +
+  coord_equal()
+print("Area Under the Curve (AUC):")
+cat("Logistic Regression:", round(roc_logit$auc, 4), "\n")
+cat("LDA Regression:", round(roc_lda$auc, 4), "\n")
+cat("QDA Regression:", round(roc_qda$auc, 4), "\n")
+cat("Naive Bayes:", round(roc_nb$auc, 4), "\n")
+```
+
+The goal of the ROC curve is to evaluate each model's ability to identify between good and bad wine where an AUC of 0.5 being random guessing. Furthermore, we plot the ROC curve to take into account different thresholds of sensitivity, specificity, and the false positive rate. This way the models are assesed on correctly detecting good wines, correctly rejecting bad wines, and not mistakenly classifying bad wines as good. The models with the higher AUC will be the ones that have a stronger classification performance.
+
+All of the models achieved an AUC of at least 0.77 which revealed a good classification performance. The highest AUC scores where the QDA and Naive Bayes models with a score of 0.7879 and 0.7886 respectively. The QDA takes into account nonlinear relationships and thus is better able to capture the covariance differences. The Naive Bayes assumes conditional independence between the predictors given the class label and so this reduces the variance in the estimation. However, this comes at a bias-variance tradeoff and so while the Naive Bayes models had the highest AUC it had lower accuracy than the QDA model.
+
+Overall, with the ROC analysis, the QDA and Naive Bayes have the strongest classification performance for the wine data as shown by their high and similar AUC score.
+
+## 10. Effect of Threshold Selection
+
+```{r}
+# 
+library(knitr)
+thresholds <- seq(0.3, 0.7, by = 0.05)
+threshold_results <- map_dfr(thresholds, function(t) {
+  pred <- factor(ifelse(logit_probs > t, 1, 0), levels=c(0,1))
+  cm <- confusionMatrix(pred, test$quality)
+  data.frame(
+    Threshold = t,
+    Accuracy = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+})
+threshold_long <- threshold_results %>%
+  pivot_longer(cols = -Threshold, names_to = "Metric", values_to = "Value")
+
+ggplot(threshold_long, aes(x = Threshold, y = Value, color = Metric)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray50") +
+  labs(title = "Effect of Decision Threshold on Classification Metrics",
+       subtitle = "Dashed line shows the default 0.5 threshold",
+       x = "Decision Threshold", y = "Value") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set2")
+
+kable(round(threshold_results, 3),
+      caption = "Classification Metrics Across Decision Thresholds")
+```
+
+To further evaluate the impact of the classification cutoff, the performance metrics were evaluated across the thresholds [0.30, 0.70]. Rather than using the default 0.50 decision boundary, the analysis aims to showcase how predictive behavior changes as the threshold varies.
+
+As revealed by the plot and table, the increasing threshold resulted in higher sensitivity and lower specificity. The sensitivity trend going from 0.288 to 0.833 shows that the higher threshold led to fewer wines being classified as good, thus a better detection of bad wines (the positive class). The specificity trend going from 0.928 to 0.539 shows that a higher threshold was worse at identifying good wines leading to more good wines being misclassified as bad.
+
+So, when choosing an appropriate threshold the low end of 0.30 gave high specificity and low sensitivity while the threshold of 0.70 gave the inverse, high sensitivity and low specificity. The analysis confirms that the threshold of 0.55 gave the best accuracy while balancing the sensitivity-specificity tradeoff.
+
+## 11. Cross-Validation
+
+```{r}
+# Cross-Validation
+train$quality <- factor(train$quality, levels=c(0,1), labels=c("Bad","Good"))
+test$quality  <- factor(test$quality,  levels=c(0,1), labels=c("Bad","Good"))
+ctrl <- trainControl(method="cv", number=10, classProbs=TRUE)
+
+cv_logit <- train(quality ~ alcohol + `volatile acidity` + sulphates +  `citric acid`+`fixed acidity`,
+                  data=train, method="glm",
+                  family="binomial", trControl=ctrl)
+
+cv_lda <- train(quality ~ alcohol + `volatile acidity` + sulphates +  `citric acid`+`fixed acidity`,
+                data=train, method="lda", trControl=ctrl)
+
+cv_qda <- train(quality ~ alcohol + `volatile acidity` + sulphates +  `citric acid`+`fixed acidity`,
+                data=train, method="qda", trControl=ctrl)
+
+cv_nb <- train(quality ~ alcohol + `volatile acidity` + sulphates +  `citric acid`+`fixed acidity`,
+               data=train, method="naive_bayes", trControl=ctrl)
+cv_results <- resamples(list(
+  Logistic = cv_logit,
+  LDA = cv_lda,
+  QDA = cv_qda,
+  NaiveBayes = cv_nb
+))
+summary(cv_results)
+bwplot(cv_results, main = "10-Fold Cross-Validation Results")
+```
+
+The cross validation uses a binary response where our categories are 0, the bad wine, and 1, the good wine. We craft 4 classification models and a cross validation control where all the models use the same features: `alcohol`, `volatile acidity`, `sulphates`, `citric acid`, and `fixed acidity`.
+
+The logistic regression uses a linear relationship on the logit scale and models the log-odds of good wine. This model is most volatile and had mean accuracy of 0.6905. This model is best at mapping specific data distributions but struggled with an unrepresentative sample of wine data.
+
+The LDA model uses multivariate normal predictors and an equal covariance between classes to craft a linear decision boundary. It had a lower overall mean accuracy of 0.6933. This implies that while the linear assumption serves as an effective baseline, it struggled to fully map the data once the additional acidity feature was introduced.
+
+The QDA model is the most flexible model here since it permits unequal covariance between classes and can take into account non linear relationships at the tradeoff of an increase in variance. It had the highest accuracy mean of 0.7005. This can be attributed to the fact that a curved decision boundary for the QDA better captures the complex relationships between the different acidity predictors in the data, leading to a gain in accuracy over the linear models.
+
+The Naive Bayes model had the lowest performance of the four models with an accuracy of 0.6648. Since this model applies the assumption that all the features are independent of each other the low accuracy implies this assumption is false. The assumption is further underscored as false since the correlation analysis revealed that there are relationships between the predictors. Thus by ignoring these relationships the Naive Bayes model performed the worst.
+
+While all the models had a comparable accuracy performance, when it comes the strongest classification model the QDA is the optimal choice for having the the highest mean accuracy of 0.7005. The non linear assumption proved to be strongest and further solidifies that fact that for the model to be effective it must consider the correlation between the chemical properties of the predictors.
