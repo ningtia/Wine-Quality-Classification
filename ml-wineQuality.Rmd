@@ -1,0 +1,973 @@
+---
+title: "Final Statistical Learning Assignment - Wine Quality Classification"
+author: 'Authors: Marel Arturo Castro, Ning Tian, Yanqing Shao'
+header-includes:
+   - \usepackage{booktabs}
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 4
+    latex_engine: xelatex
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: paged
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+## 1. Introduction & Data Preparation
+
+The project aims to use probability learning tools in statistics to predict the quality of wine based on its physicochemical indicators
+
+We first imported the red wine and white wine datasets, then extracted the first 500 samples from each and mixed them to form a total dataset containing 1000 samples with 13 features (2 categories and 11 numerics). To transform the regression problem into a binary classification problem, we binarized the target variable `quality`: a score of 6 or higher was defined as "good wine" (labeled 1), and a score below 6 was defined as "bad wine" (labeled 0).
+
+```{r include=FALSE}
+library(readr)
+library(tidyverse)
+library(class)    
+library(caret)    
+library(pROC)  
+library(e1071)        
+library(kernlab)      
+library(ggplot2)
+library(patchwork)
+library(viridis)
+library(kableExtra)
+library(tree)
+library(randomForest)
+library(gbm)
+library(xgboost)
+library(tibble)
+library(forcats)
+library(knitr)
+```
+
+```{r include=FALSE}
+set.seed(456)
+# prepare
+red_wine <- read_delim("winequality-red.csv", 
+                              delim = ";", escape_double = FALSE, trim_ws = TRUE)
+white_wine <- read_delim("winequality-white.csv", 
+                       delim = ";", escape_double = FALSE, trim_ws = TRUE)
+red_wine <- red_wine[1:500,]
+red_wine$type <- "red"
+white_wine <- white_wine[1:500,]
+white_wine$type <- "white"
+wine_total <- rbind(red_wine,white_wine)
+wine_total$quality <- ifelse(wine_total$quality>=6,1,0) # 1 as good quality, 0 as bad quality
+wine_total$quality <- factor(wine_total$quality,levels=c(1,0))
+wine_total$type <- as.factor(wine_total$type)
+```
+
+```{r include=FALSE}
+index <- sample(1:nrow(wine_total),nrow(wine_total)) # mixed red and white wines here
+wine_total <- wine_total[index,]
+trainIndex <- createDataPartition(wine_total$quality, p = 0.7, list = FALSE)
+train <- wine_total[trainIndex, ]
+test  <- wine_total[-trainIndex, ]
+train_x <- train %>% select(-quality)
+test_x  <- test%>% select(-quality)
+train_y <- train$quality
+test_y <- test$quality
+```
+
+```{r include=FALSE}
+dummies <- dummyVars(~ ., data = train_x)
+train_x <- predict(dummies, train_x)
+test_x  <- predict(dummies, test_x)
+
+train_x <- scale(train_x)
+test_x <- scale(test_x,
+                     center = attr(train_x, "scaled:center"),
+                     scale = attr(train_x, "scaled:scale"))
+```
+
+## 2. KNN
+
+KNN identifies the $K$ most similar instances in the feature space to make a classification. The similarity is defined by the Euclidean distance $d(x_i, x_{l})$ between two points:
+
+$$d(x_i, x_{l}) = \sqrt{\sum_{j=1}^p (x_{ij} - x_{lj})^2}$$
+
+A fundamental requirement for KNN is Standardization. Because the distance is calculated as a sum of squared differences across all features, variables with larger numerical ranges (such as total sulfur dioxide) would dominate the distance metric compared to variables with smaller ranges (such as chlorides). To ensure each feature contributes equally to the similarity measure, we center and scale the data.
+
+### 2.1 Using k-NN and decision boundaries
+
+The KNN model achieves 70.57% accuracy, significantly above the baseline (p\<0.001). It performs better on class 0 (Sensitivity =0.7964) than on class 1 (Specificity =0.5909).
+
+```{r echo=FALSE}
+# k-NN with k = 3
+knn_pred_k3 <- knn(
+  train = train_x,
+  test = test_x,
+  cl = train_y,
+  k = 3
+)
+print("when k-neighbors = 3:")
+confusionMatrix(knn_pred_k3, test_y)
+```
+
+```{r include=FALSE}
+pca_model <- prcomp(train_x, center = FALSE, scale. = FALSE)
+train_pca <- pca_model$x[, 1:2]
+test_pca <- predict(pca_model, test_x)[, 1:2]
+```
+
+From the plot: as k increases (1-\>5-\>15), decision boundaries become smoother, reducing overfitting. k=1 is highly sensitive to noise; k=5 improves stability; k=15 may start underfitting. The overlap between classes suggests limited separability in the data.
+
+```{r echo=FALSE}
+x_range <- seq(min(train_pca[, 1]) - 0.5,
+               max(train_pca[, 1]) + 0.5, length.out = 100)
+
+y_range <- seq(min(train_pca[, 2]) - 0.5,
+               max(train_pca[, 2]) + 0.5, length.out = 100)
+
+grid <- expand.grid(PC1 = x_range, PC2 = y_range)
+
+grid$k1 <- knn(train = train_pca,
+               test = as.matrix(grid),
+               cl = train_y, k = 1)
+
+grid$k5 <- knn(train = train_pca,
+               test = as.matrix(grid[, c("PC1", "PC2")]),
+               cl = train_y, k = 5)
+
+grid$k15 <- knn(train = train_pca,
+                test = as.matrix(grid[, c("PC1", "PC2")]),
+                cl = train_y, k = 15)
+
+p_k1 <- ggplot() +
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = k1), alpha = 0.3) +
+  geom_point(data = data.frame(PC1 = train_pca[,1],
+                               PC2 = train_pca[,2],
+                               quality = train_y),
+             aes(x = PC1, y = PC2, color = quality), size = 2) +
+  labs(title = "k = 1 (PCA space)") +
+  theme_minimal() + theme(legend.position = "none")
+
+p_k5 <- ggplot() +
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = k5), alpha = 0.3) +
+  geom_point(data = data.frame(PC1 = train_pca[,1],
+                               PC2 = train_pca[,2],
+                               quality = train$quality),
+             aes(x = PC1, y = PC2, color = quality), size = 2) +
+  labs(title = "k = 5 (PCA space)") +
+  theme_minimal() + theme(legend.position = "none")
+
+p_k15 <- ggplot() +
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = k15), alpha = 0.3) +
+  geom_point(data = data.frame(PC1 = train_pca[,1],
+                               PC2 = train_pca[,2],
+                               quality = train$quality),
+             aes(x = PC1, y = PC2, color = quality), size = 2) +
+  labs(title = "k = 15 (PCA space)") +
+  theme_minimal()
+
+(p_k1 | p_k5 | p_k15)
+```
+
+### 2.2 Selecting the Optimal k
+
+We used 10 folds validation to search the optimal k. The KNN accuracy varies across k values and peaks at k=9 (0.717). Smaller k tends to overfit, while larger k leads to underfitting. k=9 provides a good bias–variance trade-off. Thus, k=9 is selected as the optimal value.
+
+```{r include=FALSE}
+k_values <- 2:30
+accuracy <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  
+  folds <- createFolds(train_y, k = 10)
+  fold_acc <- c()
+  
+  for (j in seq_along(folds)) {
+    
+    val_idx <- folds[[j]]
+    
+    x_train_fold <- train_x[-val_idx, ]
+    y_train_fold <- train_y[-val_idx]
+    
+    x_val_fold <- train_x[val_idx, ]
+    y_val_fold <- train_y[val_idx]
+    
+    pred <- knn(
+      train = x_train_fold,
+      test = x_val_fold,
+      cl = y_train_fold,
+      k = k_values[i]
+    )
+    
+    fold_acc[j] <- mean(pred == y_val_fold)
+  }
+  
+  accuracy[i] <- mean(fold_acc)
+}
+
+k_results <- data.frame(k = k_values, Accuracy = accuracy)
+```
+
+```{r echo=FALSE}
+ggplot(k_results, aes(x = k, y = Accuracy)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_vline(xintercept = k_values[which.max(accuracy)],
+             linetype = "dashed") +
+  labs(title = "k-NN: Selecting Optimal k",
+       x = "k", y = "Accuracy") +
+  theme_minimal()
+
+cat("Optimal k:", k_values[which.max(accuracy)], "\n")
+cat("Best accuracy:", max(accuracy), "\n")
+```
+
+### 2.3 Compare with `caret`
+
+Using caret with 10-fold cross-validation, the optimal k is 5 (Accuracy = 0.7105), slightly better than the manually selected k=9. The final test accuracy reaches 0.7258, indicating good generalization. The lower specificity (0.6288) shows worse performance on class 1.
+
+
+```{r echo=FALSE}
+ctrl <- trainControl(method = "cv", number = 10)
+
+knn_cv <- train(quality ~ .,
+                data = train,
+                method = "knn",
+                trControl = ctrl,
+                preProcess = c("center", "scale"),
+                tuneGrid = data.frame(k = 2:30))
+
+print(knn_cv)
+plot(knn_cv)
+
+knn_cv_pred <- predict(knn_cv, test)
+confusionMatrix(knn_cv_pred, test_y)
+```
+### 2.4 ROC/AUC
+
+```{r knn-auc, echo=FALSE}
+knn_cv_prob <- predict(knn_cv, test, type = "prob")
+knn_prob_pos <- as.numeric(knn_cv_prob[, "1"])
+
+roc_knn <- roc(test_y, knn_prob_pos, levels = c("1", "0"))
+cat("KNN AUC:", round(auc(roc_knn), 4), "\n")
+```
+
+
+The AUC of 0.7859 confirms that the tuned KNN model has acceptable discriminatory power and it sits above the 0.7 threshold that distinguishes fair from acceptable classification and is a meaningful improvement over random guessing. These results are consistent with the fact that we would expect theoretically a KNN model as a distance based method that struggles when dimensionality increases, and with 13 features and so the curse of dimensionality begins to dilute the quality of the nearest neighbor comparisons. The model achieves its best performance on Good wines with a Sensitivity of 80.24%, but trails on Specificity at 62.88%, meaning it has a notable tendency to predict Good quality when the wine is actually Bad. This asymmetric performance could be because of the class imbalance in the dataset and suggests that a lower classification threshold could recover some of the lost Specificity at an acceptable cost to Sensitivity.
+
+## 3. Support Vector Machines
+
+### 3.1 Linear VS RBF Kernel VS Polynomial Kernel
+
+```{r include=FALSE}
+# Linear SVM
+svm_linear <- svm(
+  x = train_x,
+  y = train_y,
+  kernel = "linear",
+  cost = 1
+)
+
+pred_linear <- predict(svm_linear, test_x)
+confusionMatrix(pred_linear, test_y)
+```
+
+```{r include=FALSE}
+svm_rbf <- svm(
+  x = train_x,
+  y = train_y,
+  kernel = "radial",
+  gamma = 0.1,
+  cost = 1,
+  probability = TRUE
+
+)
+pred <- predict(svm_rbf, test_x)
+confusionMatrix(pred, test_y)
+
+```
+
+```{r include=FALSE}
+svm_poly <- svm(
+  x = train_x,
+  y = train_y,
+  kernel = "polynomial",
+  degree = 2,
+  coef0 = 1,
+  cost = 1
+)
+
+pred_poly <- predict(svm_poly, test_x)
+confusionMatrix(pred_poly, test_y)
+```
+
+```{r echo=FALSE}
+results <- data.frame(
+  Model = c("Linear SVM", "RBF SVM", "Polynomial SVM"),
+  Accuracy = c(
+    mean(predict(svm_linear, test_x) == test_y),
+    mean(predict(svm_rbf, test_x) == test_y),
+    mean(pred_poly == test_y)
+  )
+)
+
+results
+```
+
+The RBF SVM achieves the highest accuracy (0.7425), indicating non-linear patterns in the data. Linear and Polynomial kernels perform similarly 0.736	, suggesting limited ability to capture complexity. The RBF kernel improves performance by mapping data into a higher dimensional space. Therefore, RBF SVM is the best choice for this task.
+
+### 3.2 Cross-Validation and Tune Parameters
+
+To improve the generalization performance of the SVM model and avoid overfitting, we perform hyperparameter tuning using k-fold cross-validation. Specifically, we use the `tune()` function in R, which by default applies 10-fold cross-validation to evaluate different combinations of cost and gamma parameters.
+
+The optimal parameters are cost=1 and gamma=0.5. A larger cost increases the penalty for misclassification, improving fit. A smaller gamma leads to a smoother decision boundary, reducing overfitting. This combination achieves a good bias–variance trade off. The heatmap shows the lowest error at cost=1 and gamma=0.5 (=0.262), indicating the best performance.
+
+The SVM achieves a test accuracy of 0.7559, outperforming the baseline (NIR=0.5585). High Sensitivity (0.79) indicates strong performance on class 0. Specificity (0.712) is lower, suggesting weaker detection of class 1.
+
+```{r echo=FALSE}
+tune_result <- tune(
+  svm,
+  train.x = train_x,
+  train.y = train_y,
+  kernel = "radial",
+  ranges = list(
+    cost = c(0.1, 1, 10, 100),
+    gamma = c(0.01, 0.1, 0.5, 1,2)
+  )
+)
+tune_result$best.parameters
+```
+
+```{r echo=FALSE}
+perf_data <- tune_result$performances
+
+ggplot(perf_data, aes(x = factor(gamma), y = factor(cost), fill = error)) +
+  geom_tile() +
+  geom_text(aes(label = round(error, 3)), color = "white") +
+  scale_fill_viridis(option = "plasma", direction = -1) +
+  labs(title = "SVM Grid Search (Wine Data)",
+       x = "Gamma", y = "Cost", fill = "Error") +
+  theme_minimal()
+```
+
+```{r echo=FALSE}
+best_svm <- tune_result$best.model
+pred_best <- predict(best_svm, test_x)
+print("predict on test set:")
+confusionMatrix(pred_best, test_y)
+```
+
+### 3.3 Decision Boundary
+
+The plot shows substantial overlap between the two classes in the PCA space, with no clear separable boundary. Although the RBF kernel captures non-linear patterns, misclassifications remain in overlapping regions. This suggests that the intrinsic separability of the data is limited, which constrains model performance.
+
+```{r echo=FALSE}
+# Train SVM on PCA space
+svm_pca <- svm(
+  x = train_pca,
+  y = train_y,
+  kernel = "radial",
+  gamma = 0.5,
+  cost = 1
+)
+
+# Create grid
+x_range <- seq(min(train_pca[,1]) - 1, max(train_pca[,1]) + 1, length = 200)
+y_range <- seq(min(train_pca[,2]) - 1, max(train_pca[,2]) + 1, length = 200)
+
+grid <- expand.grid(PC1 = x_range, PC2 = y_range)
+grid$pred <- predict(svm_pca, grid)
+
+# Plot
+ggplot() +
+  geom_tile(data = grid, aes(x = PC1, y = PC2, fill = pred), alpha = 0.3) +
+  geom_point(data = data.frame(PC1 = train_pca[,1],
+                               PC2 = train_pca[,2],
+                               quality = train_y),
+             aes(x = PC1, y = PC2, color = quality), size = 2) +
+  geom_point(data = data.frame(PC1 = train_pca[svm_pca$index,1],
+                               PC2 = train_pca[svm_pca$index,2]),
+             aes(x = PC1, y = PC2),
+             shape = 1, size = 4) +
+  labs(title = "SVM (RBF) Decision Boundary in PCA Space") +
+  theme_minimal()
+```
+
+### 3.4 ROC/AUC SVM
+
+
+```{r svm-auc, echo=FALSE}
+best_svm_prob <- svm(
+  x = train_x,
+  y = train_y,
+  kernel = "radial",
+  cost = tune_result$best.parameters$cost,
+  gamma = tune_result$best.parameters$gamma,
+  probability = TRUE
+)
+
+pred_best_prob <- predict(best_svm_prob, test_x, probability = TRUE)
+svm_prob_pos <- attr(pred_best_prob, "probabilities")[, "1"]
+
+roc_svm <- roc(test_y, svm_prob_pos, levels = c("1", "0"))
+cat("SVM AUC:", round(auc(roc_svm), 4), "\n")
+```
+The tuned RBF SVM achieved an AUC of 0.8077 and represents a good discriminatory capability and a meaningful increase from the KNN AUC of 0.7859. The model's accuracy of 75.59% and balanced performance, Sensitivity 79.04 and Specificity 71.21%, which confirms that the RBF kernel successfully captured the non linear relationships in the data that the linear and polynomial kernels could not fully account for. However, the SVM still falls short of the. One practical limitation is that SVMs do not naturally produce calibrated probabilities and the scores extracted here via Platt scaling are an approximation. So for applications requiring reliable probability estimates such as cost-sensitive threshold adjustment, the ensemble methods would be the more trustworthy choice.
+
+
+## 4.0.0 Tree Based Models
+
+### 4.1.0 Introduction
+
+```{r tree-setup, echo=FALSE}
+
+my_seed    = 80085
+ntree_fast = 250
+ntree_main = 500
+cv_folds   = 10 
+
+class_metrics = function(truth, pred, positive = "1") {
+  truth = factor(truth, levels = c("0", "1"))
+  pred  = factor(pred,  levels = c("0", "1"))
+
+  tp = sum(truth == positive & pred == positive)
+  tn = sum(truth != positive & pred != positive)
+  fp = sum(truth != positive & pred == positive)
+  fn = sum(truth == positive & pred != positive)
+
+  tibble(
+    Accuracy    = (tp + tn) / length(truth),
+    Sensitivity = ifelse(tp + fn > 0, tp / (tp + fn), NA_real_),
+    Specificity = ifelse(tn + fp > 0, tn / (tn + fp), NA_real_),
+    F1          = ifelse(tp > 0, 2 * tp / (2 * tp + fp + fn), NA_real_)
+  )
+}
+```
+
+We will explores Tree-Based Models, as a class of non-linear algorithms to partition the feature space into a set of rectangles and fit a simple model in each one. While single decision trees are highly interpretable, they often suffer from high variance; therefore, much of this assignment focuses on Ensemble Methods—Bagging, Random Forests, and Boosting—which combine multiple trees to significantly improve predictive performance.
+
+
+### 4.2.0 Data Preperation
+
+```{r data-prep, include=FALSE}
+
+set.seed(my_seed)
+
+red_wine   = read_delim("winequality-red.csv",   delim = ";",
+                          escape_double = FALSE, trim_ws = TRUE)
+white_wine = read_delim("winequality-white.csv", delim = ";",
+                          escape_double = FALSE, trim_ws = TRUE)
+
+red_wine   = red_wine[1:500, ];   red_wine$type   = "red"
+white_wine = white_wine[1:500, ]; white_wine$type = "white"
+
+wine_total          = rbind(red_wine, white_wine)
+wine_total$quality  = ifelse(wine_total$quality >= 6, 1, 0)
+wine_total$quality  = factor(wine_total$quality, levels = c("0", "1"))
+wine_total$type     = factor(wine_total$type)
+
+# Shuffl with a stratified 70/30 split
+index      = sample(nrow(wine_total))
+wine_total = wine_total[index, ]
+colnames(wine_total) = make.names(colnames(wine_total))
+
+trainIndex = createDataPartition(wine_total$quality, p = 0.7, list = FALSE)
+train = wine_total[ trainIndex, ]
+test  = wine_total[-trainIndex, ]
+
+# FULL MODEL
+
+formula_full = quality ~ .
+
+# Old Model
+
+# formula_reduced <- quality ~ alcohol + `volatile acidity` + sulphates + `citric acid` + `fixed acidity`
+
+cat("Training rows:", nrow(train),
+    " | Test rows:", nrow(test), "\n")
+cat("Class balance (train):",
+    round(prop.table(table(train$quality)) * 100, 1), "%\n")
+
+```
+
+```{r data-prep-out, echo=FALSE}
+train_props = round(prop.table(table(train$quality)) * 100, 1)
+test_props  = round(prop.table(table(test$quality)) * 100, 1)
+
+split_summary = tibble(
+  `Dataset Split` = c("Training", "Test"),
+  `Total Rows`    = c(nrow(train), nrow(test)),
+  `Class 0 (%)`   = c(train_props["0"], test_props["0"]),
+  `Class 1 (%)`   = c(train_props["1"], test_props["1"])
+)
+
+kable(split_summary, 
+      caption = "Data Split and Stratified Class Balance Summary", 
+      align = "c")
+
+
+```
+To evaluate the classification  models we constructed a combined dataset of 1000 observations which consists of an equal sample of red and white variants, 500 from each. The variable `quality` was transformed into a binary variable where where a score of 6 or higher is good wine and ws designated as the postive class `1`.
+
+To ensure the models are evaluated on a on a true sample of the data the observations were randomly shuffled (under the iid assumption) and were partitioned into a 70/30 split of  traning/testing sets, respectively. Additionally, we employed stratified sampling during this split. This guarantees that the class imbalance present in the overall target variable is perfectly mirrored in both the training and testing sets, preventing biased model training that could occur from a purely random split.
+
+### 4.3.0 Single Decision Tree
+
+#### 4.3.1 Grow and Evaluate
+
+```{r single-tree-fit, echo=FALSE}
+set.seed(my_seed)
+wine_tree = tree(
+  formula_full,
+  data    = train,
+  control = tree.control(
+    nobs    = nrow(train),
+    mindev  = 0.005,
+    minsize = 10
+  )
+)
+
+summary(wine_tree)
+```
+
+```{r single-tree-plot, fig.height=6, echo = FALSE}
+plot(wine_tree)
+text(wine_tree, pretty = 0, cex = 0.7)
+title("Wine quality: Baseline Decision Tree")
+```
+
+We want to establish a baseline for our tree models so we grew the full unpruned classification tree with all the available predictors by defining the model as `quality~.`. Next we relaxed the stopping criteria `mindev = 0.005` and `minsize =  10` to allow the algorithm to deeply partition the training data.
+
+The tree used 11 distinct variables to construct its branches which revealed that essentially all the chemical properties and the wine type have some effect in separating the from Good and Bad wines with the primary root focusing on `alcohol` and secondary split of `volatile.acidity`. The model had 58 terminal nodes and the deep partioning gave a low training misclassification error rate of 11.55%, 81 misclassified out of 701 observations, and a residual mean deviance of 0.507.
+
+The training error is low but the wide tree with 58 leaves is complex and hard to visually parse and indicates some degree of overfitting top the training data and we would expect this model suffers from high variance and a low accuracy on the test data set.
+
+#### 4.3.2 Prune via Cross Validation
+
+```{r prune-cv, echo = FALSE, fig.height=4}
+wine_tree_full = tree(
+  formula_full,
+  data    = train,
+  control = tree.control(nobs = nrow(train), mindev = 0, minsize = 2)
+)
+
+set.seed(my_seed)
+cv_wine = cv.tree(wine_tree_full, FUN = prune.misclass)
+
+min_dev     = min(cv_wine$dev, na.rm = TRUE)
+best_size   = min(cv_wine$size[cv_wine$dev == min_dev], na.rm = TRUE)
+
+cat("Optimal number of terminal nodes:", best_size, "\n")
+
+tibble(size = cv_wine$size, cv_error = cv_wine$dev) %>%
+  ggplot(aes(x = size, y = cv_error)) +
+  geom_line(color = "skyblue", linewidth = 1) +
+  geom_point(color = "skyblue", size = 2.5) +
+  geom_vline(xintercept = best_size, linetype = "dashed", color = "maroon") +
+  annotate("text", x = best_size + 0.5, y = max(cv_wine$dev) * 0.97,
+           label = paste("Best =", best_size), color = "maroon", hjust = 0) +
+  labs(title = "Pruning curve: CV misclassification vs tree size",
+       x = "Number of terminal nodes", y = "CV misclassification count") +
+  theme_minimal()
+```
+
+```{r prune-fit, echo=FALSE, fig.height=5}
+wine_tree_pruned = prune.misclass(wine_tree_full, best = best_size)
+
+plot(wine_tree_pruned)
+text(wine_tree_pruned, pretty = 0, cex = 0.8)
+title(paste("Pruned tree:", best_size, "terminal nodes"))
+
+summary(wine_tree_pruned)
+
+```
+To combat the overfitting observed in the baseline model, we grew a maximal and fully saturated tree `mindev = 0`, `minsize = 2` and applied misclassification based pruning via `prune.misclass`. Using 10-fold cross validation, we evaluated the relationship between tree size and cross-validated error to find the optimal regularization penalty.
+
+The pruning curve shows that the minimal cross validation error was achieved at 6 terminal nodes and therefore we pruned the tree to that optimal size. The model gave us the 4 most critical chemical properties to classify wine quality: `alcohol`, `volatile acidity`, `citric acid`, and `total sulfur dioxide`. Stripping the model from 58 nodes to 6 creates a more interpretable model and as we expected when regularizing a model, the training misclassification error increased from 11.55% to 23.97% (168 errors out of 701 observations), with the residual mean deviance rising to 1.088.
+
+While the pruned model performed worse on the training data by forcing the tree to ignore the noise and minor fluctuations in the training set, we have traded a slight increase in bias for a massive reduction in variance. The 6 node tree is a much more robust baseline that should generalize far better to unseen data.
+
+#### 4.3.3 Evaluate on the Test Set
+
+```{r single-tree-eval, echo = FALSE}
+tree_prob = predict(wine_tree_pruned, newdata = test, type = "vector")
+tree_prob_pos = as.numeric(tree_prob[, "1"])
+tree_pred     = factor(ifelse(tree_prob_pos >= 0.5, "1", "0"), levels = c("0", "1"))
+
+metrics_tree = class_metrics(test$quality, tree_pred)
+
+confusionMatrix(tree_pred, test$quality, positive = "1")
+
+# ROC
+
+roc_tree = roc(test$quality, tree_prob_pos, levels = c("0", "1"))
+cat("Single tree AUC:", round(auc(roc_tree), 4), "\n")
+
+```
+On the 6 node tree we evaluated its predictive power on the held out test set and we generated probability scores for the test observations and classified them using a standard 0.5 threshold.
+
+The pruned tree achieved a 65.55% accuracy and is statistically better than a 50% chance of random guessing but leaves much to be desired. The 6 node tree proved slightly better at identifying Good wines than Bad wines. It achieved a Sensitivity of 69.46%, but a lower Specificity of 60.61%. The confusion matrix shows 52 False Positives, which indicates the tree has a noticeable tendency to overestimate wine quality. The AUC of the ROC is 0.6705 which is a fair but weak discriminative ability.
+
+While our 6 node model is highly interpretable and requires only four chemical properties to make a decision, it lacks the predictive power to fully capture the complex and non linear relationships in the data. To improve upon this 65.55% accuracy and 0.67 AUC, we must move beyond single decision trees and apply ensemble methods to reduce the model's variance and bias.
+
+### 4.4.0 Bagging
+
+```{r bagging-fit, echo = FALSE}
+p_wine = ncol(train) - 1
+
+set.seed(my_seed)
+wine_bag = randomForest(
+  formula_full,
+  data       = train,
+  mtry       = p_wine,        
+  ntree      = ntree_main,
+  importance = TRUE
+)
+
+# OOB confusion matrix and overall OOB error
+wine_bag
+```
+
+```{r bagging-eval, echo = FALSE}
+bag_pred     = predict(wine_bag, newdata = test, type = "response")
+bag_prob     = predict(wine_bag, newdata = test, type = "prob")
+bag_prob_pos = as.numeric(bag_prob[, "1"])
+
+metrics_bag = class_metrics(test$quality, bag_pred)
+
+confusionMatrix(bag_pred, test$quality, positive = "1")
+
+# ROC
+
+roc_bag = roc(test$quality, bag_prob_pos, levels = c("0", "1"))
+cat("Bagging AUC:", round(auc(roc_bag), 4), "\n")
+```
+To address the weak predictive power of the 6 node model we used the ensemble learning technique of bagging to help lower the high variance of the decision tree. By generating 500 bootstrapped training samples and fitting an unpruned decision tree to each, we can average the individual predictions to create a highly robust ensemble.
+
+We utilized the `randomForest` package to fit this model. By explicitly setting the `mtry = 12`, we restrict the algorithm to perform standard Bagging rather than a true Random Forest. A major advantage of this approach is the automatic calculation of the Out Of Bag (OOB) error. Because each tree is built on only 63% of the bootstrapped data, the remaining 37% acts as a built in validation set, and gives us a free and reliable estimate of test performance without needing explicit cross validation.
+
+The model achieved an OOB error rate of 22.97% and thus indicates a strong fit. Additionally, the OOB confusion matrix reveals that the model is better at identifying Good wines, 18.9% error, than Bad wines, 28.1% error, which suggests the chemical properties might separate high quality wines more distinctly.
+
+Evaluating the bagging ensemble on the 30% unseen holdout set demonstrated a massive gain in predictive power compared to our baseline single tree. The accuracy increased from 65.55% to 79.60% which represents a highly statistically significant improvement over the No Information Rate (p-value < 2e-16).
+The model also achieved a Sensitivity of 81.44% and a Specificity of 77.27%. The ensemble effectively filtered out the noise of individual overfitted trees, drastically reducing the number of false classifications across both categories.
+The AUC of the ROC increased from 0.6705 to 0.8621. This elevates the model's discriminatory capability from merely fair to excellent.
+
+However, while bagging gave a massive boost to the model's predictive power the 500 generated trees are likely highly correlated. This is due to the fact that all 12 predictors are evaluated at every single split and so dominant predictors, such as alcohol content, will dominate the root splits across the vast majority of the forest which will lead us to construct a true random forest.
+
+### 4.5.0 Random Forest
+
+#### 4.5.1 Tune `mtry`
+
+```{r rf-tune, echo = FALSE}
+base_mtry  = max(1, floor(sqrt(p_wine)))
+mtry_grid  = sort(unique(pmax(1, pmin(p_wine,
+               c(base_mtry - 1, base_mtry, base_mtry + 1,
+                 base_mtry + 2, p_wine)))))
+
+rf_tuning = map_dfr(mtry_grid, function(m) {
+  set.seed(my_seed + m)
+  fit = randomForest(formula_full, data = train,
+                      mtry = m, ntree = ntree_fast)
+  tibble(mtry = m, OOB_Error = fit$err.rate[ntree_fast, "OOB"])
+})
+
+best_mtry = rf_tuning$mtry[which.min(rf_tuning$OOB_Error)]
+cat("Best mtry:", best_mtry, "\n")
+
+rf_tuning %>%
+  ggplot(aes(x = mtry, y = OOB_Error)) +
+  geom_line(color = "chartreuse", linewidth = 1) +
+  geom_point(color = "chartreuse", size = 3) +
+  geom_vline(xintercept = best_mtry, linetype = "dashed", color = "red") +
+  labs(title = "Random Forest: OOB error vs mtry",
+       x = "mtry (predictors per split)", y = "OOB error") +
+  theme_minimal()
+```
+
+While bagging significantly improved upon the single decision tree to reduce model variance, we constructed a true Random Forest. The algorithm forces predictor decorrelation and allows weaker but useful chemical properties to influence the ensemble.
+
+To find the optimal number of predictors to sample, we established a baseline using the standard classification of $\sqrt{p}$. With 12 available predictors, our baseline `mtry` was 3. The tuning curve revealed that model performance optimized when utilizing 5 predictors per split and `mtry` of 5 provided the perfect balance between tree diversity and individual tree strength which achieved the lowest OOB misclassification error.
+
+#### 4.5.2 Fit final Random Forest
+
+```{r rf-fit, echo = FALSE}
+
+set.seed(my_seed)
+wine_rf = randomForest(
+  formula_full,
+  data       = train,
+  mtry       = best_mtry,
+  ntree      = ntree_main,
+  importance = TRUE
+)
+
+wine_rf
+```
+The optimal hyperparameter of `mtry = 5` trained the final Random Forest model. The ensemble was constructed using 500 trees to ensure the error rate fully stabilized, and we tracked variable importance metrics to interpret the driving factors behind the model's decisions.
+
+The final Random Forest achieved an OOB error rate of 22.40% which represents an improvement, albeit small, over the standard Bagging model which had an OOB error of 22.97%.The algorithm successfully prevented dominant predictors from masking the subtle, predictive signals hidden in the weaker chemical properties. The resulting ensemble is more diverse and exhibits lower overall variance.
+
+The OOB confusion matrix has maintained the behavioral pattern observed in our earlier iterations: it is significantly more adept at identifying Good wines, Class 1 error rate of 18.16%, compared to Bad wines, Class 0 error rate of 27.74%.
+
+#### 4.5.3 OOB error stabilization
+
+```{r rf-ntree, echo = FALSE, fig.height=4}
+tibble(Trees = seq_len(nrow(wine_rf$err.rate)),
+       OOB_Error = wine_rf$err.rate[, "OOB"]) %>%
+  ggplot(aes(x = Trees, y = OOB_Error)) +
+  geom_line(color = "cadetblue", linewidth = 0.8) +
+  labs(title = "Random Forest: OOB error stabilization",
+       x = "Number of trees", y = "OOB error") +
+  theme_minimal()
+
+# Readable Table
+
+rf_df = tibble(
+  Trees = seq_len(nrow(wine_rf$err.rate)),
+  OOB_Error = wine_rf$err.rate[, "OOB"]
+)
+
+important_vals = rf_df %>%
+  summarise(
+    First_Trees = first(Trees),
+    First_OOB = first(OOB_Error),
+    Best_Trees = Trees[which.min(OOB_Error)],
+    Min_OOB = min(OOB_Error),
+    Final_Trees = last(Trees),
+    Final_OOB = last(OOB_Error)
+  )
+
+important_vals
+
+```
+
+We verified the ensemble size of 500 was computationally sufficient. To observe the learning rate of the algorithm, we plotted the OOB error against the number of trees grown in the forest. With only a single tree grown, the OOB error rate started high at 28.35% which is expected. As more independent trees were added to the forest, the error rate dropped. The ensemble effect quickly averaged out the high variance of individual trees, with the model reaching its absolute minimum OOB error of 21.54% at 215 trees. Beyond the 215 tree mark, the OOB error the error rate fluctuates slightly upward before settling at 22.40% which is the minor variance in the stochastic averaging process, and isn't sign of overfitting, since random forests cannot overfit by adding more trees.
+
+####  4.5.4 Variable importance
+
+```{r rf-importance, echo = FALSE, fig.height=5}
+imp_rf = as.data.frame(importance(wine_rf))
+imp_rf$Variable = rownames(imp_rf)
+
+imp_rf %>%
+  select(Variable, MeanDecreaseAccuracy, MeanDecreaseGini) %>%
+  pivot_longer(-Variable, names_to = "Measure", values_to = "Importance") %>%
+  ggplot(aes(x = fct_reorder(Variable, Importance), y = Importance, fill = Measure)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  labs(title = "Random Forest: Variable Importance",
+       subtitle = "MeanDecreaseAccuracy: permutation-based | MeanDecreaseGini: impurity-based",
+       x = "", y = "Importance") +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal()
+
+imp_rf %>%
+  select(Variable, MeanDecreaseAccuracy, MeanDecreaseGini) %>%
+  arrange(desc(MeanDecreaseAccuracy)) %>%
+  mutate(across(where(is.numeric), round, 3))
+```
+
+These variable importance metrics quantify the predictive power of each chemical property across all 500 trees in the forest.
+We evaluated feature importance using Mean Decrease Accuracy and Mean Decrease Gini. 
+
+The Primary Drivers are `alcohol` and `volatile.acidity` which overwhelmingly dominate the model's classification process. `alcohol` is the single most important feature across both metrics, Mean Decrease Accuracy of 44.51, closely followed by `volatile.acidity`, 43.85. The Secondary Indicators are `total.sulfur.dioxide`, 26.75, `density`, 25.46, and `citric.acid`, 24.75, which all form a distinct middle tier. They contribute meaningfully to the ensemble's accuracy and node purity, but they are not the primary separators of Good and Bad wines. Surprisingly, the performance of `type` yielded a remarkably low Mean Decrease Accuracy of 3.12 and a negligible Gini decrease of 0.40. The model indicates that whether a wine is "red" or "white" is mathematically irrelevant to predicting its overall quality score.
+
+By forcing predictor decorrelation `mtry = 5`, the Random Forest successfully mapped the true predictive value of every available feature. We confidently conclude that high quality wines in this dataset are defined almost entirely by their specific chemical makeup. Primarily their alcohol content and lack of volatile acidity rather than their variant type. This may be due to the fact that while red and white wines have vastly different chemical make up, once the model knows `alcohol`, `volatile.acidity`, and `total.sulfur.dioxide` it essentially has identified the wine as either red or white and thus knowing the type adds no new information or predictive power.
+
+#### 4.5.5 Random Forest Evaluation
+
+```{r rf-eval, echo=FALSE}
+rf_pred = predict(wine_rf, newdata = test, type = "response")
+rf_prob = predict(wine_rf, newdata = test, type = "prob")
+rf_prob_pos = as.numeric(rf_prob[, "1"])
+
+metrics_rf = class_metrics(test$quality, rf_pred)
+
+confusionMatrix(rf_pred, test$quality, positive = "1")
+
+roc_rf = roc(test$quality, rf_prob_pos, levels = c("0", "1"))
+cat("Random Forest AUC:", round(auc(roc_rf), 4), "\n")
+```
+Evaluating the Random Forest on the held out test set confirms the improvement suggested by the OOB results. The model achieved an accuracy of 80.27%, which marginally  outperforms the Bagging ensemble, 79.60%, and represents a substantial gain over the baseline single tree, 65.55%. The improvement over Bagging, while modest in accuracy, is more pronounced in discriminatory power where the AUC increased from 0.8621 to 0.8777, and confirms that predictor decorrelation produces a better calibrated probability estimat even when the hard classification accuracy is similar.
+
+The model maintained the asymmetric pattern observed across all previous models, with a Sensitivity of 81.44% and a Specificity of 78.79%. The Random Forest is marginally better at identifying Good wines than Bad wines, which is consistent with the OOB confusion matrix and reflects the slight class imbalance in the dataset. The Balanced Accuracy of 80.11% confirms the model performs well across both classes rather than simply favoring the majority.
+
+The Random Forest currently leads the ensemble methods on both accuracy and AUC. However, this should be treated as the performance ceiling of our tuned parallel ensemble and the XGBoost results that follow represent a baseline sequential approach that could surpass this.
+
+### 4.6.0 XGBoost
+
+#### 4.6.1 Set Up
+
+```{r xgb-prep, echo=FALSE}
+xgb_recipe = terms(quality ~ ., data = train)
+
+x_train_xgb = model.matrix(xgb_recipe, data = train)[, -1]
+x_test_xgb  = model.matrix(xgb_recipe, data = test)[, -1]
+y_train_xgb = as.numeric(train$quality) - 1  # 0/1 numeric
+
+dtrain = xgb.DMatrix(data = x_train_xgb, label = y_train_xgb)
+dtest  = xgb.DMatrix(data = x_test_xgb)
+```
+
+```{r xgb-fit, echo = FALSE}
+wine_xgb = xgb.train(
+  params = list(
+    objective = "binary:logistic",
+    seed = my_seed,
+    eval_metric = "auc",
+    eta  = 0.05,
+    max_depth = 3,
+    subsample = 0.8,
+    colsample_bytree = 0.8,
+    min_child_weight = 1,
+    gamma  = 0
+  ),
+  data = dtrain,
+  nrounds = 300,
+  verbose = 0
+)
+```
+
+Random Forest successfully minimized model variance through parallel tree generation and predictor decorrelation, however it's limited by the performance of its individual trees. To tackle the remaining model bias we implemented Extreme Gradient Boosting (XGBoost).
+
+Because the `xgboost` algorithm relies on highly optimized matrix algebra, the training and testing datasets were first converted into strict numeric matrices using one hot encoding for categorical variables, and then transformed into specialized DMatrix objects. To configure the sequential learning process and prevent the model from rapidly overfitting the training data, we constrained the algorithm's hyperparameters
+
+We employed weak learners `max_depth = 3` and thus restricted the individual trees to be very shallow. This forces the model to learn slowly and rely on the combined power of the ensemble rather than individual, overfitted trees. The learning rate was defined as `eta = 0.05` which is a conservative shrinkage penalty. By scaling the contribution of each new tree by 5%, we ensure a gradual and stable descent toward the optimal decision boundary over `nrounds = 300` iterations. The stochastic regularization `subsample` and `colsample_bytree` parameters were both set to 0.8 in order introduce further randomness and combat overfitting, which forces the algorithm to sample only 80% of the training rows and 80% of the available predictors when constructing each new tree. The model optimizes for the AUC using a standard logistic regression objective function.
+
+#### 4.6.2 XGBoost Variable Importance
+
+```{r xgb-importance, fig.height=4, echo = FALSE}
+xgb_imp = xgb.importance(model = wine_xgb)
+xgb_imp %>%
+  head(12) %>%
+  ggplot(aes(x = fct_reorder(Feature, Gain), y = Gain)) +
+  geom_col(fill = "pink") +
+  coord_flip() +
+  labs(title = "XGBoost: Feature Importance (Gain)",
+       subtitle = "Gain: average improvement in accuracy from splits on each feature",
+       x = "", y = "Gain") +
+  theme_minimal()
+
+xgb_imp %>%
+  dplyr::select(Feature, Gain, Cover, Frequency) %>%
+  arrange(desc(Gain)) %>%
+  head(12) %>%
+  mutate(across(where(is.numeric), round, 4)) %>%
+  kable(caption = "Top Features by Gain (XGBoost)")
+```
+
+XGBoost evaluates feature importance primarily through three metrics: Gain, Cover, and Frequency. To evaluate the model we used Gain as the definitive measure of a feature's predictive power in a boosted tree.
+
+The primary drivers are `alcohol`, Gain = 0.1851 and `volatile.acidity`, Gain = 0.1548, which are also the same primary features our previous models identified and  are the most critical determinants of wine quality. The algorithm relied heavily on these two features to make its most impactful, error reducing splits. The secondary Features are `pH` and `residual.sugar` which saw a notable increase in relative importance, while density, which was a top 5 feature in the Random Forest, dropped to the bottom of the XGBoost importance list. This may be due to how sequential learning interacts with the data differently than parallel bagging. In boosting, once `alcohol` and `volatile.acidity` have explained the largest errors in early rounds, subsequent trees focus on residual errors where `pH` and `residual.sugar` provide marginal signal. Density's correlation with alcohol may cause it to be redundant once alcohol is already captured. Similar to the previous models wine type was not a meaningful contributor to the XGBoost model's predictive power. This is shown in the fact that `typewhite` doesn't even show in the importance table at all since XGBoost assigned it zero gain, meaning it contributed nothing to any split across all 300 boosting rounds. This confirms the Random Forest conclusion that wine type carries no predictive signal beyond what the chemical features already encode.
+
+The feature importance from the XGBoost model validates our earlier findings. The consistency across two vastly different ensemble methodologies solidifies the conclusion that wine quality is a function of specific chemical thresholds which are primarily high alcohol content and low volatile acidity without a preference for the algorithm that evaluates it.
+
+#### 4.6.3 XG Boost Evalaution
+
+
+```{r xgb-eval, echo=FALSE}
+xgb_prob_pos = as.numeric(predict(wine_xgb, newdata = dtest))
+xgb_pred     = factor(ifelse(xgb_prob_pos >= 0.5, "1", "0"), levels = c("0","1"))
+
+metrics_xgb = class_metrics(test$quality, xgb_pred)
+
+confusionMatrix(xgb_pred, test$quality, positive = "1")
+
+roc_xgb = roc(test$quality, xgb_prob_pos, levels = c("0", "1"))
+cat("XGBoost AUC:", round(auc(roc_xgb), 4), "\n")
+```
+The model achieved an accuracy of 76.59% and performs higher than the no information rate (p < 0.001) and represents a significant improvement over the baseline single decision tree, 65.55%. However, surprisingly the model underperformed compared to the Bagging ensemble, 79.60%. The XGBoost model demonstrated highly balanced classification, with a Sensitivity of 77.25% and a Specificity of 75.76%. It effectively minimized the disparity between recognizing Good and Bad wines and  yielded a Balanced Accuracy of 76.50%. The AUC was 0.8326 which shows a strong discriminatory capability but still below the AUC of the bagging model.
+
+To address why XGBoost did not win despite being more sophisticated it may be due to the fact that Random Forests are more robust because bagging inherently reduces variance without requiring deep tuning. Furthermore, Boosting is highly sensitive to hyperparameter configurations and dataset noise. Because we utilized a relatively static set of parameters , `max_depth = 3`, `eta = 0.05`, `nrounds = 300`, without conducting a multi-dimensional grid search, the sequential trees may have begun to overfit the noise of the training data. For this particular chemical dataset, the variance-reducing power of the Random Forest ultimately proved more effective than the bias reducing sequential approach of the XGBoost model and without an exhaustive grid search, this should be recognized as a strong baseline rather than a fully optimized XGBoost model.
+
+### 4.7.0 Final Comparison Table
+
+```{r comparison-table, echo=FALSE}
+all_results = bind_rows(
+  metrics_tree %>% mutate(Method = "Tree (Pruned)",  AUC = round(auc(roc_tree), 4)),
+  metrics_bag  %>% mutate(Method = "Bagging",        AUC = round(auc(roc_bag),  4)),
+  metrics_rf   %>% mutate(Method = "Random Forest",  AUC = round(auc(roc_rf),   4)),
+  metrics_xgb  %>% mutate(Method = "XGBoost",        AUC = round(auc(roc_xgb),  4))
+) %>%
+  select(Method, Accuracy, Sensitivity, Specificity, F1, AUC) %>%
+  arrange(desc(AUC))
+
+kable(all_results, digits = 4,
+      caption = "Test-set performance: all tree-based methods")
+```
+
+```{r roc-comparison, echo=FALSE, fig.height=5}
+roc_df = bind_rows(
+  data.frame(FPR = 1 - roc_tree$specificities,
+             TPR = roc_tree$sensitivities,
+             Method = paste0("Tree (AUC=", round(auc(roc_tree),3), ")")),
+  data.frame(FPR = 1 - roc_bag$specificities,
+             TPR = roc_bag$sensitivities,
+             Method = paste0("Bagging (AUC=", round(auc(roc_bag),3), ")")),
+  data.frame(FPR = 1 - roc_rf$specificities,
+             TPR = roc_rf$sensitivities,
+             Method = paste0("Random Forest (AUC=", round(auc(roc_rf),3), ")")),
+  data.frame(FPR = 1 - roc_xgb$specificities,
+             TPR = roc_xgb$sensitivities,
+             Method = paste0("XGBoost (AUC=", round(auc(roc_xgb),3), ")"))
+)
+
+ggplot(roc_df, aes(x = FPR, y = TPR, color = Method)) +
+  geom_line(linewidth = 1) +
+  geom_abline(linetype = "dashed", color = "grey60") +
+  labs(title = "ROC Curves: All Tree-Based Models",
+       subtitle = "Dashed line = random guessing",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)") +
+  scale_color_brewer(palette = "Set1") +
+  coord_equal() +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+The comparison table reveals the consistent hierarchy across all the tree based models. The ensemble method collectively and decisively outperforms the single pruned tree across every metric and validates the reasoning in applying ensemble learning to this dataset.
+
+The Random Forest achieved the strongest overall performance with an accuracy of 80.27% and an AUC of 0.8777 which beats bagging by narrow margin even though they share an identical Sensitivity of 81.44%. Furthermore, the AUC gap between the two, 0.8777 and 0.8621, confirms that the predictor decorrelation produces better calibrated probability estimates even when hard classification accuracy is similar. Both Bagging and Random Forest were close enough that the neither's performance is statistically significantly greater than the other however the consistent marginal advantage of Random Forest across all five metrics makes it the recommended model for this dataset.
+
+XGBoost, despite being the most sophisticated algorithm, finished third with an accuracy of 76.59% and an AUC of 0.8326. As discussed, this reflects the use of fixed hyperparameters rather than a systematic grid search and it should be treated as a strong baseline rather than a fully optimized result. A tuned XGBoost would likely challenge or surpass the Random Forest.
+
+The pruned single tree, as expected, is the weakest performer at 65.55% accuracy and AUC of 0.6705, but it remains valuable as an interpretable baseline. Its four variable decision structure of `alcohol`, `volatile acidity`, `citric acid`, and `total sulfur dioxide` provide an interpretable approximation of the classification boundary that the ensemble methods refine but cannot easily explain.
+
+Across all the models, Sensitivity consistently exceeded Specificity, meaning every method is better at identifying Good wines than Bad wines. This asymmetry is consistent with the slight class imbalance where 55.8% are Good and suggests that if the cost of misclassifying Bad wine as Good is high, which is what a winery concerned with brand reputation would care about, then threshold adjustment using the cost sensitive framework would be the how to account for the imbalance. 
+
+## 5.0.0 Closing
+
+```{r grand-comparison, echo=FALSE}
+grand_results = tibble(
+  Method      = c("Random Forest", "Bagging", "XGBoost",
+                  "SVM (Tuned RBF)", "KNN (k=5)", "Tree (Pruned)"),
+  Accuracy    = c(0.7993, 0.7960, 0.7659, 0.7425, 0.7358, 0.6555),
+  Sensitivity = c(0.8144, 0.8144, 0.7725, 0.7904, 0.7964, 0.6946),
+  Specificity = c(0.7803, 0.7727, 0.7576, 0.7121, 0.5909, 0.6061),
+  AUC         = c(0.8777, 0.8621, 0.8326, 0.8077,     0.7859,     0.6705)
+) %>%
+  arrange(desc(Accuracy))
+
+kable(grand_results, digits = 4,
+      caption = "Grand comparison: all methods on wine quality classification",
+      align = "c",
+      na = "—") 
+
+```
+The Random Forest emerged as the strongest overall model with an accuracy of 79.93% and an AUC of 0.8777, narrowly edging Bagging on every metric. The ensemble tree methods collectively outperformed both KNN and the tuned SVM, which is a meaningful finding and it suggests that for this particular dataset, variance reduction through parallel ensemble averaging is more effective than the geometric margin maximization of SVM or the distance based similarity of KNN.
+
+The SVM and KNN results reveal a shared pattern that both methods achieve high Specificity on Bad wines but struggle with Sensitivity on Good wines, indicating they are conservative classifiers that default toward the majority class prediction under uncertainty. The tree ensembles show more balanced performance across both classes, which is likely attributed to the bootstrap sampling process naturally exposing each tree to varied class distributions.
+
+The single pruned decision tree, although being the weakest performer at 65.55% accuracy, contributes the most interpretable finding of the entire report. Its four variable structure of` alcohol`, `volatile acidity`, `citric acid`, and `total sulfur dioxide`  provide an easiy and interpretable decision rule that every subsequent, more powerful model then validates and refines. The fact that alcohol appears as the root split in the decision tree, the top feature in Random Forest importance, and the highest Gain feature in XGBoost constitutes strong, multiple methodological evidence that alcohol content is the single most reliable chemical indicator of wine quality in this dataset.
+
+Equally as important is the consistent irrelevance of wine type. Across both the Random Forest importance analysis and the XGBoost Gain table, `typewhite` contributed a negligible or zero predictive signal. This suggests that the chemical properties of a wine, especially alcohol content and volatile acidity, are already encoded the information needed to predict quality regardless of whether the wine is red or white, and that type classification is a redundant input once the chemical properties are known.
+
+Several limitations do constrain the strength of these conclusions however. The XGBoost model was evaluated with a fixed set of hyperparameters rather than a systematic grid search, and is a strong baseline but not a fully optimized result and a tuned XGBoost would likely surpass the Random Forest. All models used a standard 0.5 classification threshold. For a real world winery application where the cost of labelling a Bad wine as Good carries brand and reputational risk substantially higher than the reverse error. Therefore, future iterations of this model will incorporate cost sensitive threshold tuning to minimize these costly false positives, ensuring the final algorithm is both mathematically accurate and commercially actionable.
+
